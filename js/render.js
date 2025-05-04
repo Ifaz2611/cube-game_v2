@@ -1,11 +1,11 @@
 /*
  * File:    render.js
  *
- * Rendering class renders world to canvas according to player's viewport.
+ * Enhanced rendering class for high-performance world rendering with WebGL.
  *
  * Author:  Karl Kangur <karl.kangur@gmail.com>
  * Licence: WTFPL 2.0 (http://en.wikipedia.org/wiki/WTFPL)
- * Updated by: Ifaz2611, 
+ * Enhanced by: Ifaz2611
  */
 
 class Renderer {
@@ -15,18 +15,19 @@ class Renderer {
         this.player = player;
         this.camera = null;
         
-        // Try WebGL first, fallback to 2D
-        this.context = this.canvas.getContext('webgl') || this.canvas.getContext('2d');
-        this.vertex = new Map();
+        // Initialize WebGL
+        this.gl = this.initWebGL();
+        this.vertexBuffer = new Map();
+        this.instanceBuffer = null;
         
-        // Responsive canvas sizing
+        // Canvas sizing
         this.resizeCanvas();
         this.w2 = Math.floor(this.canvas.width / 2);
         this.h2 = Math.floor(this.canvas.height / 2);
         
         this.focalLength = 500;
-        this.nodeRenderDist = 100;
-        this.chunkRenderDist = 420;
+        this.nodeRenderDist = 150; // Increased for stronger rendering
+        this.chunkRenderDist = 500;
         this.workingFace = null;
         this.workingNode = null;
         this.renderNodes = [];
@@ -44,13 +45,13 @@ class Renderer {
         this.time = Date.now();
         this.frustrum = [];
         this.lowResChunks = [];
+        this.lighting = { ambient: 0.3, directional: { x: 0.5, y: -1, z: 0.5 } };
         
         this.n3d = {};
         this.n2d = {};
         
-        // Texture loading with promise
-        this.texture = new Image();
-        this.texture.src = "media/texture.png";
+        // Texture loading
+        this.textures = this.initTextures();
         this.crosshair = new Image();
         this.crosshair.src = "media/crosshair.png";
         
@@ -58,16 +59,107 @@ class Renderer {
         this.clickedNode = null;
         this.clickedFace = null;
         
-        // Initialize event listeners
+        // Initialize shaders and programs
+        this.shaderProgram = this.initShaders();
+        this.setupBuffers();
+        
+        // Event listeners
         this.initEventListeners();
         
-        // Async texture loading
-        this.texture.onload = () => {
-            this.textureSize = this.texture.width / 16;
-        };
-        
         this.render = this.render.bind(this);
-        this.render();
+        this.startRenderLoop();
+    }
+
+    initWebGL() {
+        const gl = this.canvas.getContext('webgl2') || this.canvas.getContext('webgl');
+        if (!gl) {
+            throw new Error('WebGL not supported');
+        }
+        gl.enable(gl.DEPTH_TEST);
+        gl.enable(gl.CULL_FACE);
+        return gl;
+    }
+
+    initShaders() {
+        const vertexShaderSrc = `
+            attribute vec3 aPosition;
+            attribute vec2 aTexCoord;
+            attribute vec3 aInstancePos;
+            uniform mat4 uModelViewProj;
+            uniform vec3 uLightDir;
+            varying vec2 vTexCoord;
+            varying float vLight;
+            void main() {
+                vec4 pos = vec4(aPosition + aInstancePos, 1.0);
+                gl_Position = uModelViewProj * pos;
+                vTexCoord = aTexCoord;
+                vLight = max(dot(normalize(uLightDir), normalize(aPosition)), 0.0);
+            }
+        `;
+        
+        const fragmentShaderSrc = `
+            precision mediump float;
+            varying vec2 vTexCoord;
+            varying float vLight;
+            uniform sampler2D uTexture;
+            uniform float uAmbient;
+            void main() {
+                vec4 texColor = texture2D(uTexture, vTexCoord);
+                gl_FragColor = texColor * (vLight + uAmbient);
+            }
+        `;
+        
+        const vertexShader = this.gl.createShader(this.gl.VERTEX_SHADER);
+        this.gl.shaderSource(vertexShader, vertexShaderSrc);
+        this.gl.compileShader(vertexShader);
+        
+        const fragmentShader = this.gl.createShader(this.gl.FRAGMENT_SHADER);
+        this.gl.shaderSource(fragmentShader, fragmentShaderSrc);
+        this.gl.compileShader(fragmentShader);
+        
+        const program = this.gl.createProgram();
+        this.gl.attachShader(program, vertexShader);
+        this.gl.attachShader(program, fragmentShader);
+        this.gl.linkProgram(program);
+        
+        if (!this.gl.getProgramParameter(program, this.gl.LINK_STATUS)) {
+            throw new Error('Shader program linking failed');
+        }
+        
+        return program;
+    }
+
+    async initTextures() {
+        const texture = new Image();
+        texture.src = "media/texture.png";
+        await new Promise(resolve => texture.onload = resolve);
+        
+        const glTexture = this.gl.createTexture();
+        this.gl.bindTexture(this.gl.TEXTURE_2D, glTexture);
+        this.gl.texImage2D(this.gl.TEXTURE_2D, 0, this.gl.RGBA, this.gl.RGBA, this.gl.UNSIGNED_BYTE, texture);
+        this.gl.generateMipmap(this.gl.TEXTURE_2D);
+        this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MIN_FILTER, this.gl.LINEAR_MIPMAP_LINEAR);
+        
+        this.textureSize = texture.width / 16;
+        return { main: glTexture };
+    }
+
+    setupBuffers() {
+        // Cube geometry for nodes
+        const vertices = new Float32Array([
+            // Front face
+            -0.5, -0.5,  0.5,  0.0, 0.0,
+             0.5, -0.5,  0.5,  1.0, 0.0,
+             0.5,  0.5,  0.5,  1.0, 1.0,
+            -0.5,  0.5,  0.5,  0.0, 1.0,
+            // ... Add other faces similarly
+        ]);
+        
+        this.vertexBuffer = this.gl.createBuffer();
+        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexBuffer);
+        this.gl.bufferData(this.gl.ARRAY_BUFFER, vertices, this.gl.STATIC_DRAW);
+        
+        this.instanceBuffer = this.gl.createBuffer();
     }
 
     resizeCanvas() {
@@ -75,10 +167,11 @@ class Renderer {
         this.canvas.height = window.innerHeight;
         this.w2 = Math.floor(this.canvas.width / 2);
         this.h2 = Math.floor(this.canvas.height / 2);
+        this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     }
 
     initEventListeners() {
-        this.canvas.onmousedown = (event) => {
+        this.canvas.addEventListener('mousedown', (event) => {
             if (this.mouselock) {
                 this.mouseClick = { x: 0, y: 0, button: event.button };
             } else {
@@ -88,22 +181,22 @@ class Renderer {
                     button: event.button
                 };
             }
-        };
+        });
 
-        window.onresize = () => this.resizeCanvas();
-        this.canvas.oncontextmenu = () => false;
-        this.canvas.onblur = () => this.canvas.focus();
+        window.addEventListener('resize', () => this.resizeCanvas());
+        this.canvas.addEventListener('contextmenu', () => false);
+        this.canvas.addEventListener('blur', () => this.canvas.focus());
         this.canvas.focus();
     }
 
-    lockPointer() {
+    async lockPointer() {
         if (!('pointerLockElement' in document)) {
-            console.error("Pointer lock unavailable in this browser.");
+            console.error("Pointer lock unavailable");
             return;
         }
 
         document.addEventListener('pointerlockchange', this.mouseLockChangeCallback.bind(this), false);
-        this.canvas.requestPointerLock();
+        await this.canvas.requestPointerLock();
     }
 
     mouseLockChangeCallback() {
@@ -125,15 +218,7 @@ class Renderer {
 
     changeRenderDist(value) {
         this.nodeRenderDist = parseInt(value);
-        this.chunkRenderDist = parseInt(value) + 320;
-    }
-
-    prerender(width, height, renderFunction) {
-        const buffer = document.createElement("canvas");
-        buffer.width = width;
-        buffer.height = height;
-        renderFunction(buffer.getContext('2d'));
-        return buffer;
+        this.chunkRenderDist = parseInt(value) + 350;
     }
 
     getFrustrumPlanes() {
@@ -160,86 +245,63 @@ class Renderer {
         ];
 
         let length;
-        for (let i = 0; i < 4; i++) {
-            const v1 = vectors[i];
+        this.frustrum = vectors.map((v1, i) => {
             const v2 = vectors[(i + 1) % 4];
-            
-            this.frustrum[i] = {
+            const plane = {
                 x: v1.y * v2.z - v1.z * v2.y,
                 y: v1.z * v2.x - v1.x * v2.z,
                 z: v1.x * v2.y - v1.y * v2.x
             };
-
             if (!length) {
-                length = 1 / Math.sqrt(
-                    this.frustrum[i].x ** 2 +
-                    this.frustrum[i].y ** 2 +
-                    this.frustrum[i].z ** 2
-                );
+                length = 1 / Math.sqrt(plane.x ** 2 + plane.y ** 2 + plane.z ** 2);
             }
-
-            this.frustrum[i].x *= length;
-            this.frustrum[i].y *= length;
-            this.frustrum[i].z *= length;
-        }
+            return {
+                x: plane.x * length,
+                y: plane.y * length,
+                z: plane.z * length
+            };
+        });
     }
 
-    renderLowResChunk(chunk) {
-        // Simplified rendering for distant chunks
-        const ctx = this.context;
-        const chunkCenter = {
-            x: chunk.x * 16 + 8,
-            z: chunk.z * 16 + 8
-        };
-
-        // Calculate distance from camera
+    renderLowResChunk(chunk, lodLevel) {
+        const chunkCenter = { x: chunk.x * 16 + 8, z: chunk.z * 16 + 8 };
         const dx = chunkCenter.x - this.camera.x;
         const dz = chunkCenter.z - this.camera.z;
         const distance = Math.sqrt(dx * dx + dz * dz);
 
-        // Skip if too far or behind
         if (distance > this.chunkRenderDist || this.n2d.x * dx + this.n2d.z * dz < -13) {
             return;
         }
 
-        // Approximate chunk height
+        // LOD-based simplification
+        const detailLevel = Math.min(3, Math.floor(distance / 100));
         const avgHeight = chunk.renderNodes.reduce((sum, node) => sum + node.y, 0) / 
                          (chunk.renderNodes.length || 1);
 
-        // Project chunk center to screen
-        const relPos = {
-            x: dx,
-            y: avgHeight - this.camera.y,
-            z: dz
-        };
+        // Use instanced rendering for simplified geometry
+        const instanceData = new Float32Array([
+            chunkCenter.x - this.camera.x,
+            avgHeight - this.camera.y,
+            chunkCenter.z - this.camera.z
+        ]);
 
-        const xx = this.player.rotTrig.cosy * relPos.x + this.player.rotTrig.siny * relPos.z;
-        const yy = this.player.rotTrig.sinx * this.player.rotTrig.siny * relPos.x +
-                  this.player.rotTrig.cosx * relPos.y -
-                  this.player.rotTrig.sinx * this.player.rotTrig.cosy * relPos.z;
-        const zz = -this.player.rotTrig.siny * this.player.rotTrig.cosx * relPos.x +
-                  this.player.rotTrig.sinx * relPos.y +
-                  this.player.rotTrig.cosx * this.player.rotTrig.cosy * relPos.z;
+        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.instanceBuffer);
+        this.gl.bufferData(this.gl.ARRAY_BUFFER, instanceData, this.gl.DYNAMIC_DRAW);
 
-        if (zz <= 0) return;
+        this.gl.useProgram(this.shaderProgram);
+        this.gl.uniform1f(this.gl.getUniformLocation(this.shaderProgram, 'uAmbient'), this.lighting.ambient);
+        this.gl.uniform3f(this.gl.getUniformLocation(this.shaderProgram, 'uLightDir'), 
+            this.lighting.directional.x, 
+            this.lighting.directional.y, 
+            this.lighting.directional.z
+        );
 
-        const scale = this.focalLength / zz;
-        const screenX = xx * scale + this.w2;
-        const screenY = -yy * scale + this.h2;
-
-        // Draw simplified chunk representation
-        ctx.save();
-        ctx.globalAlpha = Math.max(0.2, 1 - distance / this.chunkRenderDist);
-        ctx.fillStyle = '#666666';
-        ctx.beginPath();
-        ctx.arc(screenX, screenY, 10 * scale, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-
+        // Simplified geometry based on LOD
+        this.gl.drawArraysInstanced(this.gl.TRIANGLES, 0, 6, 1);
         this.chunkCount++;
     }
 
-    render() {
+    async render() {
         try {
             this.player.update();
             
@@ -260,16 +322,12 @@ class Renderer {
                 z: this.player.position.z
             };
 
-            this.chunkCount = 0;
-            this.nodeCount = 0;
-            this.faceCount = 0;
-            this.vertexCount = 0;
-            this.vertex.clear();
-            this.context.clearRect(0, 0, this.canvas.width, this.canvas.height);
+            this.gl.clear(this.gl.COLOR_BUFFER_BIT | this.gl.DEPTH_BUFFER_BIT);
             this.getFrustrumPlanes();
             this.renderNodes = [];
             this.lowResChunks = [];
 
+            // Batch process chunks
             for (const chunk of Object.values(this.world.chunks)) {
                 const rcp = {
                     x: chunk.x * 16 + 8 - this.camera.x,
@@ -291,17 +349,25 @@ class Renderer {
 
             let fogDistance = 50;
             
+            // Render LOD chunks
             this.lowResChunks.sort((a, b) => b.distance - a.distance);
             for (const lowResChunk of this.lowResChunks) {
-                this.renderLowResChunk(lowResChunk.chunk);
+                this.renderLowResChunk(lowResChunk.chunk, Math.floor(lowResChunk.distance / 100));
                 fogDistance = this.fogLayer(fogDistance, lowResChunk.distance);
             }
 
+            // Render high-detail nodes
             this.renderNodes.sort((a, b) => b.distance - a.distance);
-            for (const renderNode of this.renderNodes) {
-                this.renderNode(renderNode.node);
-                fogDistance = this.fogLayer(fogDistance, renderNode.distance);
-            }
+            const instanceData = new Float32Array(this.renderNodes.length * 3);
+            this.renderNodes.forEach((node, i) => {
+                instanceData[i * 3] = node.node.x - this.camera.x;
+                instanceData[i * 3 + 1] = node.node.y - this.camera.y;
+                instanceData[i * 3 + 2] = node.node.z - this.camera.z;
+            });
+
+            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.instanceBuffer);
+            this.gl.bufferData(this.gl.ARRAY_BUFFER, instanceData, this.gl.DYNAMIC_DRAW);
+            this.gl.drawArraysInstanced(this.gl.TRIANGLES, 0, 6, this.renderNodes.length);
 
             // Handle mouse interaction
             if (this.mouseClick) {
@@ -314,7 +380,7 @@ class Renderer {
                         case FACE.BACK: newNode.z--; break;
                         case FACE.RIGHT: newNode.x++; break;
                         case FACE.LEFT: newNode.x--; break;
-                        case FACE.TOP: newNode.y++; break;
+                        case TOP: newNode.y++; break;
                         case FACE.BOTTOM: newNode.y--; break;
                     }
 
@@ -329,20 +395,22 @@ class Renderer {
                 this.mouseClick = null;
             }
 
+            // Render HUD elements (using 2D context for simplicity)
+            const ctx = this.canvas.getContext('2d');
             if (this.mouselock) {
-                this.context.drawImage(this.crosshair, this.w2 - 8, this.h2 - 8);
+                ctx.drawImage(this.crosshair, this.w2 - 8, this.h2 - 8);
             }
 
             if (this.hud) {
-                this.displayHud();
+                this.displayHud(ctx);
             }
 
             if (this.graph) {
-                this.displayPerformanceGraph();
+                this.displayPerformanceGraph(ctx);
             }
 
             if (this.map) {
-                this.displayHeightMap();
+                this.displayHeightMap(ctx);
             }
 
             if (Date.now() - this.time >= 1000) {
@@ -351,22 +419,26 @@ class Renderer {
                 this.time = Date.now();
             }
             this.frames++;
-
-            window.requestAnimationFrame(this.render);
         } catch (error) {
             console.error('Render error:', error);
         }
     }
 
+    startRenderLoop() {
+        const loop = () => {
+            this.render();
+            window.requestAnimationFrame(loop);
+        };
+        window.requestAnimationFrame(loop);
+    }
+
     fogLayer(fogDistance, currentDistance) {
         if (fogDistance < 80 && currentDistance < this.nodeRenderDist - fogDistance) {
-            this.context.globalAlpha = 0.5;
-            this.context.fillStyle = "#eeeeee";
-            this.context.beginPath();
-            this.context.fillRect(0, 0, this.canvas.width, this.canvas.height);
-            this.context.closePath();
-            this.context.fill();
-            this.context.globalAlpha = 1;
+            const ctx = this.canvas.getContext('2d');
+            ctx.globalAlpha = 0.5;
+            ctx.fillStyle = "#eeeeee";
+            ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+            ctx.globalAlpha = 1;
             return fogDistance + 20;
         }
         return fogDistance;
@@ -396,172 +468,12 @@ class Renderer {
         }
     }
 
-    renderNode(node) {
-        this.workingNode = node;
-        this.rx = node.x - this.camera.x;
-        this.ry = node.y - this.camera.y;
-        this.rz = node.z - this.camera.z;
-        this.rp = [];
-
-        const faces = [
-            { side: FACE.FRONT, vertex: VERTEX.FRONT, check: node.z + 1 < this.camera.z },
-            { side: FACE.BACK, vertex: VERTEX.BACK, check: node.z > this.camera.z },
-            { side: FACE.RIGHT, vertex: VERTEX.RIGHT, check: node.x + 1 < this.camera.x },
-            { side: FACE.LEFT, vertex: VERTEX.LEFT, check: node.x > this.camera.x },
-            { side: FACE.TOP, vertex: VERTEX.TOP, check: node.y + 1 < this.camera.y },
-            { side: FACE.BOTTOM, vertex: VERTEX.BOTTOM, check: node.y > this.camera.y }
-        ];
-
-        for (const { side, vertex, check } of faces) {
-            if (node.sides & side && check) {
-                this.workingFace = side;
-                this.drawRect(vertex);
-            }
-        }
-    }
-
-    drawRect(p) {
-        const offset = OFFSET;
-        for (let i = 0; i < 4; i++) {
-            const index = `${this.workingNode.x + offset[p[i]].x}_${this.workingNode.y + offset[p[i]].y}_${this.workingNode.z + offset[p[i]].z}`;
-            
-            if (this.vertex.has(index)) {
-                this.rp[p[i]] = this.vertex.get(index);
-                continue;
-            }
-
-            const x = this.rx + offset[p[i]].x;
-            const y = this.ry + offset[p[i]].y;
-            const z = this.rz + offset[p[i]].z;
-
-            if (x * this.n3d.x + y * this.n3d.y + z * this.n3d.z < 0) {
-                this.rp[p[i]] = false;
-                this.vertex.set(index, false);
-                continue;
-            }
-
-            const xx = this.player.rotTrig.cosy * x + this.player.rotTrig.siny * z;
-            const yy = this.player.rotTrig.sinx * this.player.rotTrig.siny * x +
-                      this.player.rotTrig.cosx * y -
-                      this.player.rotTrig.sinx * this.player.rotTrig.cosy * z;
-            const zz = -this.player.rotTrig.siny * this.player.rotTrig.cosx * x +
-                      this.player.rotTrig.sinx * y +
-                      this.player.rotTrig.cosx * this.player.rotTrig.cosy * z;
-
-            const zzScale = this.focalLength / zz;
-            this.rp[p[i]] = { x: xx * zzScale, y: -yy * zzScale };
-            this.vertex.set(index, this.rp[p[i]]);
-            this.vertexCount++;
-        }
-
-        if (this.mouseClick) {
-            if (
-                (this.mouseClick.y - this.rp[p[0]].y) * (this.rp[p[1]].x - this.rp[p[0]].x) -
-                (this.mouseClick.x - this.rp[p[0]].x) * (this.rp[p[1]].y - this.rp[p[0]].y) < 0 &&
-                (this.mouseClick.y - this.rp[p[2]].y) * (this.rp[p[3]].x - this.rp[p[2]].x) -
-                (this.mouseClick.x - this.rp[p[2]].x) * (this.rp[p[3]].y - this.rp[p[2]].y) < 0 &&
-                (this.mouseClick.y - this.rp[p[1]].y) * (this.rp[p[2]].x - this.rp[p[1]].x) -
-                (this.mouseClick.x - this.rp[p[1]].x) * (this.rp[p[2]].y - this.rp[p[1]].y) < 0 &&
-                (this.mouseClick.y - this.rp[p[3]].y) * (this.rp[p[0]].x - this.rp[p[3]].x) -
-                (this.mouseClick.x - this.rp[p[3]].x) * (this.rp[p[0]].y - this.rp[p[3]].y) < 0
-            ) {
-                this.clickedNode = this.workingNode;
-                this.clickedFace = this.workingFace;
-            }
-        }
-
-        if (this.renderMode === 0) {
-            this.drawMonochrome(p);
-        } else if (this.renderMode === 1) {
-            this.drawTextured(p);
-        }
-
-        this.faceCount++;
-    }
-
-    drawMonochrome(p) {
-        const points = [];
-        for (const point of [0, 1, 2, 3]) {
-            if (this.rp[p[point]]) {
-                points.push(this.rp[p[point]]);
-            }
-        }
-
-        if (points.length > 1) {
-            this.context.strokeStyle = "#000000";
-            this.context.lineWidth = 1;
-            this.context.fillStyle = this.workingNode.type.color;
-            this.context.globalAlpha = this.workingNode.type.transparent ? 0.5 : 1;
-
-            this.context.beginPath();
-            this.context.moveTo(points[0].x + this.w2, points[0].y + this.h2);
-            for (let i = 1; i < points.length; i++) {
-                this.context.lineTo(points[i].x + this.w2, points[i].y + this.h2);
-            }
-            this.context.closePath();
-            this.context.fill();
-            this.context.stroke();
-            this.context.globalAlpha = 1;
-        }
-    }
-
-    drawTextured(p) {
-        const texture = this.workingNode.type.texture(this.workingFace);
-        const size = this.textureSize;
-        const pts = [
-            { x: this.rp[p[0]].x, y: this.rp[p[0]].y, u: size * texture[0], v: size * texture[1] },
-            { x: this.rp[p[1]].x, y: this.rp[p[1]].y, u: size * texture[0], v: size * texture[1] + size },
-            { x: this.rp[p[2]].x, y: this.rp[p[2]].y, u: size * texture[0] + size, v: size * texture[1] + size },
-            { x: this.rp[p[3]].x, y: this.rp[p[3]].y, u: size * texture[0] + size, v: size * texture[1] }
-        ];
-
-        const tris = [];
-        if (this.rp[p[0]] && this.rp[p[1]] && this.rp[p[2]]) {
-            tris.push([0, 1, 2]);
-        } else if (this.rp[p[1]] && this.rp[p[2]] && this.rp[p[3]]) {
-            tris.push([1, 2, 3]);
-        }
-
-        if (this.rp[p[2]] && this.rp[p[3]] && this.rp[p[0]]) {
-            tris.push([2, 3, 0]);
-        } else if (this.rp[p[0]] && this.rp[p[1]] && this.rp[p[3]]) {
-            tris.push([0, 1, 3]);
-        }
-
-        for (const [pp0, pp1, pp2] of tris) {
-            const x0 = pts[pp0].x + this.w2, x1 = pts[pp1].x + this.w2, x2 = pts[pp2].x + this.w2;
-            const y0 = pts[pp0].y + this.h2, y1 = pts[pp1].y + this.h2, y2 = pts[pp2].y + this.h2;
-            const u0 = pts[pp0].u, u1 = pts[pp1].u, u2 = pts[pp2].u;
-            const v0 = pts[pp0].v, v1 = pts[pp1].v, v2 = pts[pp2].v;
-
-            this.context.save();
-            this.context.beginPath();
-            this.context.moveTo(x0, y0);
-            this.context.lineTo(x1, y1);
-            this.context.lineTo(x2, y2);
-            this.context.closePath();
-            this.context.clip();
-
-            const delta = u0 * v1 + v0 * u2 + u1 * v2 - v1 * u2 - v0 * u1 - u0 * v2;
-            const delta_a = x0 * v1 + v0 * x2 + x1 * v2 - v1 * x2 - v0 * x1 - x0 * v2;
-            const delta_b = u0 * x1 + x0 * u2 + u1 * x2 - x1 * u2 - x0 * u1 - u0 * x2;
-            const delta_c = u0 * v1 * x2 + v0 * x1 * u2 + x0 * u1 * v2 - x0 * v1 * u2 - v0 * u1 * x2 - u0 * x1 * v2;
-            const delta_d = y0 * v1 + v0 * y2 + y1 * v2 - v1 * y2 - v0 * y1 - y0 * v2;
-            const delta_e = u0 * y1 + y0 * u2 + u1 * y2 - y1 * u2 - y0 * u1 - u0 * y2;
-            const delta_f = u0 * v1 * y2 + v0 * y1 * u2 + y0 * u1 * v2 - y0 * v1 * u2 - v0 * u1 * y2 - u0 * y1 * v2;
-
-            this.context.transform(delta_a / delta, delta_d / delta, delta_b / delta, delta_e / delta, delta_c / delta, delta_f / delta);
-            this.context.drawImage(this.texture, 0, 0);
-            this.context.restore();
-        }
-    }
-
-    displayHud() {
-        this.context.save();
-        this.context.textBaseline = "top";
-        this.context.textAlign = "left";
-        this.context.fillStyle = "#000000";
-        this.context.font = "12px sans-serif";
+    displayHud(ctx) {
+        ctx.save();
+        ctx.textBaseline = "top";
+        ctx.textAlign = "left";
+        ctx.fillStyle = "#000000";
+        ctx.font = "12px sans-serif";
         const metrics = [
             `FPS: ${this.fps}`,
             `Chunks: ${this.chunkCount}`,
@@ -572,11 +484,11 @@ class Renderer {
             `Y: ${this.player.position.y.toFixed(2)}`,
             `Z: ${this.player.position.z.toFixed(2)}`
         ];
-        metrics.forEach((text, i) => this.context.fillText(text, 0, i * 12));
-        this.context.restore();
+        metrics.forEach((text, i) => ctx.fillText(text, 0, i * 12));
+        ctx.restore();
     }
 
-    displayPerformanceGraph() {
+    displayPerformanceGraph(ctx) {
         if (!this.graph || typeof this.graph !== 'object') {
             this.graph = {
                 fps: [],
@@ -588,10 +500,8 @@ class Renderer {
 
             this.graph.base = this.prerender(this.graph.width, this.graph.height, ctx => {
                 ctx.fillStyle = "#EEEEEE";
-                ctx.beginPath();
                 ctx.rect(0, 0, this.graph.width, this.graph.height);
                 ctx.fill();
-                ctx.closePath();
 
                 ctx.strokeStyle = '#CCCCCC';
                 ctx.lineWidth = 1;
@@ -601,7 +511,6 @@ class Renderer {
                     ctx.lineTo(i * this.graph.interval, this.graph.height);
                 }
                 ctx.stroke();
-                ctx.closePath();
             });
         }
 
@@ -632,7 +541,6 @@ class Renderer {
                     ctx.lineTo(i * this.graph.interval, y);
                 });
                 ctx.stroke();
-                ctx.closePath();
 
                 const avgFps = this.graph.fps.reduce((sum, fps) => sum + fps, 0) / this.graph.fps.length;
                 ctx.textBaseline = "top";
@@ -642,10 +550,10 @@ class Renderer {
             });
         }
 
-        this.context.drawImage(this.graph.image, this.canvas.width - this.graph.width, 0);
+        ctx.drawImage(this.graph.image, this.canvas.width - this.graph.width, 0);
     }
 
-    displayHeightMap() {
+    displayHeightMap(ctx) {
         const mapsize = 64;
         const x = Math.floor(this.camera.x / 16);
         const z = Math.floor(this.camera.z / 16);
@@ -684,24 +592,31 @@ class Renderer {
             });
         }
 
-        this.context.save();
-        this.context.translate(this.canvas.width - mapsize, this.canvas.height - mapsize);
-        this.context.rotate(this.player.rotation.y);
+        ctx.save();
+        ctx.translate(this.canvas.width - mapsize, this.canvas.height - mapsize);
+        ctx.rotate(this.player.rotation.y);
         
-        this.context.beginPath();
-        this.context.arc(0, 0, mapsize, 0, Math.PI * 2, false);
-        this.context.closePath();
-        this.context.clip();
+        ctx.beginPath();
+        ctx.arc(0, 0, mapsize, 0, Math.PI * 2, false);
+        ctx.clip();
 
-        this.context.drawImage(
+        ctx.drawImage(
             this.map.heightmap, 0, 0, 64, 64,
             -this.map.step * (((this.camera.x % 16) + 16) % 16) - this.map.offset,
             this.map.step * (((this.camera.z % 16) + 16) % 16) - this.map.offset,
             this.map.size, this.map.size
         );
 
-        this.context.restore();
-        this.context.drawImage(this.map.position, this.canvas.width - mapsize - 8, this.canvas.height - mapsize - 8);
+        ctx.restore();
+        ctx.drawImage(this.map.position, this.canvas.width - mapsize - 8, this.canvas.height - mapsize - 8);
+    }
+
+    prerender(width, height, renderFunction) {
+        const buffer = document.createElement("canvas");
+        buffer.width = width;
+        buffer.height = height;
+        renderFunction(buffer.getContext('2d'));
+        return buffer;
     }
 }
 
@@ -711,3 +626,5 @@ window.requestFrame = window.requestAnimationFrame ||
     window.oRequestAnimationFrame ||
     window.msRequestAnimationFrame ||
     (callback => window.setTimeout(callback, 10));
+
+export default Renderer;
