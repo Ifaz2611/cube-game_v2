@@ -1,146 +1,149 @@
-SQUARIFIC = {framework: {}};
-SQUARIFIC.framework.TouchControl = function (elem, settings) {
-	/* Settings: 
-		{
-			pretendArrowKeys: boolean, //Should it simulate keypresses of the arrows
-		}
-	*/
+const SQUARIFIC = { framework: {} };
+
+SQUARIFIC.framework.TouchControl = function (elem, settings = {}) {
 	"use strict";
-	var callbackList = [],
-		self = this,
-		originalStyle,
-		originalX = 0,
-		originalY = 0,
-		fakeKeyspressed = [],
-		multiple = 45,
-		angleKeys = [
-			{angle: 0, keyCodes: [39]},
-			{angle: 45, keyCodes: [39, 40]},
-			{angle: 90, keyCodes: [40]},
-			{angle: 135, keyCodes: [40, 37]},
-			{angle: 180, keyCodes: [37]},
-			{angle: -180, keyCodes: [37]},
-			{angle: -135, keyCodes: [37, 38]},
-			{angle: -90, keyCodes: [38]},
-			{angle: -45, keyCodes: [38, 39]}
-		]; //Angle is in degrees and should be a multiple of the var "multiple",x-axis to the right = 0 left = 180, y-axis down = 90 up = -90, one angle can occur multiple times, e.g. {angle: 30, keyCodes: [1]}, {angle: 30, keyCodes: [2]} will fire 1 and 2, {angle: 30, keyCodes: [1, 1]} will fire 1 twice, -180 and 180 should both be added;
-	if (!settings) {
-		settings = {};
-	}
-	if (isNaN(settings.mindistance)) {
-		settings.mindistance = 20;
-	}
-	if (isNaN(settings.middleLeft)) {
-		settings.middleLeft = 0;
-	}
-	if (isNaN(settings.middleTop)) {
-		settings.middleTop = 0;
-	}
-	if (!elem) {
-		throw "Joystick Control: No element provided! Provided:" + elem;
-	}
-	settings.pretendArrowKeys = true; //Remove once non-pretend is implemented
-	this.on = function (name, callback) {
-		callbackList.sort(function (a, b) {return a.id - b.id;}); //To get a unique id we need the highest id last
-		if (callbackList.length < 1) {
-			var next = 0;
-		} else {
-			var next = callbackList[callbackList.length - 1].id + 1;
-		}
-		callbackList.push({id: next, name: name, cb: callback});
-		return next;
+
+	// Default settings
+	settings.pretendArrowKeys = true;
+	settings.mindistance = isNaN(settings.mindistance) ? 20 : settings.mindistance;
+	settings.middleLeft = isNaN(settings.middleLeft) ? 0 : settings.middleLeft;
+	settings.middleTop = isNaN(settings.middleTop) ? 0 : settings.middleTop;
+
+	if (!elem) throw "TouchControl Error: No element provided.";
+
+	const self = this;
+	const callbacks = [];
+	const multiple = 45;
+	let originalStyle, originalX = 0, originalY = 0;
+	let fakeKeysPressed = [];
+
+	// Key map by angle
+	const angleKeys = [
+		{ angle: 0, keyCodes: [39] },       // Right
+		{ angle: 45, keyCodes: [39, 40] },  // Down-right
+		{ angle: 90, keyCodes: [40] },      // Down
+		{ angle: 135, keyCodes: [40, 37] }, // Down-left
+		{ angle: 180, keyCodes: [37] },     // Left
+		{ angle: -180, keyCodes: [37] },    // Left
+		{ angle: -135, keyCodes: [37, 38] },// Up-left
+		{ angle: -90, keyCodes: [38] },     // Up
+		{ angle: -45, keyCodes: [38, 39] }  // Up-right
+	];
+
+	// Public: Register a callback
+	this.on = function (name, cb) {
+		const id = callbacks.length ? callbacks[callbacks.length - 1].id + 1 : 0;
+		callbacks.push({ id, name, cb });
+		return id;
 	};
+
+	// Public: Remove a callback by ID
 	this.removeOn = function (id) {
-		var i;
-		for (i = 0; i < callbackList.length; i++) {
-			if (callbackList[i].id === id) {
-				callbackList.splice(id);
-				return true;
-			}
+		const index = callbacks.findIndex(c => c.id === id);
+		if (index !== -1) {
+			callbacks.splice(index, 1);
+			return true;
 		}
 		return false;
 	};
+
+	// Internal: Trigger callbacks
 	this.cb = function (name, arg) {
-		var i;
-		for (i = 0; i < callbackList.length; i++) {
-			if (callbackList[i].name === name && typeof callbackList[i].cb == "function") {
-				callbackList[i].cb(arg);
+		for (const cb of callbacks) {
+			if (cb.name === name && typeof cb.cb === "function") {
+				cb.cb(arg);
 			}
 		}
 	};
-	this.removeNonFakedKeys = function (keys) {
-		for (var i = 0; i < fakeKeyspressed.length; i++) {
-			if (!self.inArray(fakeKeyspressed[i], keys)) {
-				self.cb("pretendKeyup", {keyCode: fakeKeyspressed[i]});
+
+	// Internal: Check if value exists in array
+	this.inArray = function (val, arr) {
+		return arr && arr.includes(val);
+	};
+
+	// Internal: Remove fake keys not currently active
+	this.removeNonFakedKeys = function (activeKeys = []) {
+		for (const key of fakeKeysPressed) {
+			if (!activeKeys.includes(key)) {
+				this.cb("pretendKeyup", { keyCode: key });
 			}
 		}
+		fakeKeysPressed = activeKeys.slice();
 	};
-	this.inArray = function (el, arr) {
-		if (!arr) {
-			return false;
-		}
-		for (var i = 0; i < arr.length; i++) {
-			if (arr[i] === el) {
-				return true;
-			}
-		}
-		return false;
+
+	// Internal: Calculate angle to nearest 45°
+	const getRoundedAngle = (dx, dy) => {
+		return multiple * Math.round((Math.atan2(dy, dx) * 180 / Math.PI) / multiple);
 	};
-	this.handleTouchStart = function (event) {
-		if (event.changedTouches[0].target == elem) {
-			originalStyle = {position: elem.style.position, top: elem.style.top, left: elem.style.left};
-			originalX = event.changedTouches[0].clientX;
-			originalY = event.changedTouches[0].clientY;
+
+	// Touch start
+	this.handleTouchStart = (event) => {
+		if (event.changedTouches[0].target === elem) {
+			const touch = event.changedTouches[0];
+			originalStyle = {
+				position: elem.style.position,
+				top: elem.style.top,
+				left: elem.style.left
+			};
+			originalX = touch.clientX;
+			originalY = touch.clientY;
 			elem.style.position = "fixed";
-			elem.style.left = event.changedTouches[0].clientX - settings.middleLeft + "px";
-			elem.style.top = event.changedTouches[0].clientY - settings.middleTop + "px";
+			elem.style.left = `${touch.clientX - settings.middleLeft}px`;
+			elem.style.top = `${touch.clientY - settings.middleTop}px`;
 			event.preventDefault();
 		}
 	};
-	this.handleTouchStop = function (event) {
-		if (event.changedTouches[0].target == elem) {
-			elem.style.position = originalStyle.position;
-			elem.style.top = originalStyle.top;
-			elem.style.left = originalStyle.left;
-			self.removeNonFakedKeys();
+
+	// Touch end
+	this.handleTouchStop = (event) => {
+		if (event.changedTouches[0].target === elem) {
+			Object.assign(elem.style, originalStyle);
+			this.removeNonFakedKeys([]);
 			event.preventDefault();
 		}
 	};
-	this.handleTouchMove = function (event) {
-		if (event.changedTouches[0].target == elem) {
-			var i, k, keys = [], angle, distance,
-			deltaX = event.changedTouches[0].clientX - originalX,
-			deltaY = event.changedTouches[0].clientY - originalY;
-			elem.style.left = event.changedTouches[0].clientX - settings.middleLeft + "px";
-			elem.style.top = event.changedTouches[0].clientY - settings.middleTop + "px";
+
+	// Touch move
+	this.handleTouchMove = (event) => {
+		if (event.changedTouches[0].target === elem) {
+			const touch = event.changedTouches[0];
+			const dx = touch.clientX - originalX;
+			const dy = touch.clientY - originalY;
+			const distance = Math.sqrt(dx * dx + dy * dy);
+
+			elem.style.left = `${touch.clientX - settings.middleLeft}px`;
+			elem.style.top = `${touch.clientY - settings.middleTop}px`;
 			event.preventDefault();
-			distance = Math.sqrt(Math.pow(deltaX, 2) + Math.pow(deltaY, 2));
+
 			if (settings.pretendArrowKeys) {
 				if (distance < settings.mindistance) {
-					self.removeNonFakedKeys();
-				} else {
-					angle = multiple * Math.round((Math.atan2(deltaY, deltaX) * 180 / Math.PI) / multiple);
-					for (i = 0; i < angleKeys.length; i++) {
-						if (angleKeys[i].angle === angle) {
-							for (k = 0; k < angleKeys[i].keyCodes.length; k++) {
-								keys.push(angleKeys[i].keyCodes[k]);
-							}
-						}
-					}
-					for (i = 0; i < keys.length; i++) {
-						if (!self.inArray(keys[i], fakeKeyspressed)) {
-							fakeKeyspressed.push(keys[i]);
-						}
-						self.cb("pretendKeydown", {keyCode: keys[i]});
-					}
-					self.removeNonFakedKeys(keys);
+					this.removeNonFakedKeys([]);
+					return;
 				}
-			} else {
-				//Planned for later
+
+				const angle = getRoundedAngle(dx, dy);
+				const keys = [];
+
+				for (const mapping of angleKeys) {
+					if (mapping.angle === angle) {
+						keys.push(...mapping.keyCodes);
+					}
+				}
+
+				// Fire keydown events
+				for (const key of keys) {
+					if (!this.inArray(key, fakeKeysPressed)) {
+						this.cb("pretendKeydown", { keyCode: key });
+					}
+				}
+
+				this.removeNonFakedKeys(keys);
 			}
 		}
 	};
-	elem.addEventListener("touchstart", self.handleTouchStart);
-	elem.addEventListener("touchend", self.handleTouchStop);
-	elem.addEventListener("touchmove", self.handleTouchMove);
+
+	// Register event listeners
+	elem.addEventListener("touchstart", this.handleTouchStart);
+	elem.addEventListener("touchend", this.handleTouchStop);
+	elem.addEventListener("touchmove", this.handleTouchMove);
 };
