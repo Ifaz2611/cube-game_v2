@@ -1,92 +1,84 @@
 /*
  * File:    save.js
- *
  * Saves game state with player information to file or locally.
  *
  * Author:  Karl Kangur <karl.kangur@gmail.com>
- * Licence: WTFPL 2.0 (http://en.wikipedia.org/wiki/WTFPL)
- * Update by Ifaz2611
+ * License: WTFPL 2.0 (http://en.wikipedia.org/wiki/WTFPL)
+ * Updated by: Ifaz2611
 */
 
-function Save(world, player)
-{
+function Save(world, player) {
 	this.world = world;
 	this.player = player;
-	
+
 	this.getSavedWorlds();
 }
 
-Save.prototype.removeLocalSave = function()
-{
-	window.localStorage.removeItem(document.getElementById("load").value);
-	this.getSavedWorlds();
-}
+// ####################################### LOCAL STORAGE HANDLING
 
-// populate saved games select input
-Save.prototype.getSavedWorlds = function()
-{
-	var options = [];
-	for(var key in window.localStorage)
-	{
-		if(key.indexOf("world") === 0)
-		{
-			options.push('<option value="'+key+'">'+key+' ('+((window.localStorage[key].length/1024)|0)+'KB)</option>');
+Save.prototype.removeLocalSave = function () {
+	const selectedKey = document.getElementById("load").value;
+	if (selectedKey) {
+		window.localStorage.removeItem(selectedKey);
+		this.getSavedWorlds();
+	}
+};
+
+Save.prototype.getSavedWorlds = function () {
+	const options = [];
+
+	for (const key in window.localStorage) {
+		if (key.startsWith("world")) {
+			const sizeKB = (window.localStorage[key].length / 1024) | 0;
+			options.push(`<option value="${key}">${key} (${sizeKB}KB)</option>`);
 		}
 	}
+
 	options.sort();
 	document.getElementById("load").innerHTML = options.join("");
-}
+};
 
-// ############################################################ SAVE METHODS
+// ####################################### SAVE METHODS
 
-Save.prototype.saveLocally = function()
-{
-	try
-	{
-		window.localStorage.setItem(document.getElementById("saveas").value, this.getSaveData());
-	}
-	catch(e)
-	{
-		switch(e.code)
-		{
-			// data wasn't successfully saved due to quota exceed
-			case 22: alert("Could not save world: not enough space."); break;
-			default: alert("Could not save world. Error code "+e.code);
+Save.prototype.saveLocally = function () {
+	try {
+		const name = document.getElementById("saveas").value;
+		window.localStorage.setItem(name, this.getSaveData());
+	} catch (e) {
+		if (e.code === 22 || e.name === 'QuotaExceededError') {
+			alert("Could not save world: not enough space.");
+		} else {
+			alert("Could not save world. Error code: " + e.code);
 		}
 	}
-	
 	this.getSavedWorlds();
-}
+};
 
-Save.prototype.saveToFile = function()
-{
-	document.location = "data:text/octet-stream,"+this.getSaveData();
-}
+Save.prototype.saveToFile = function () {
+	const dataStr = "data:text/octet-stream," + encodeURIComponent(this.getSaveData());
+	document.location = dataStr;
+};
 
-Save.prototype.getSaveData = function()
-{
-	var chunk_x = Math.floor(this.player.position.x/16);
-	var chunk_z = Math.floor(this.player.position.z/16);
-	
-	var saveNodes = [];
-	for(var i in this.world.chunks)
-	{
-		if(Math.abs(this.world.chunks[i].x-chunk_x) <= 1 && Math.abs(this.world.chunks[i].z-chunk_z) <= 1)
-		{
-			for(var j in this.world.chunks[i].nodes)
-			{
+Save.prototype.getSaveData = function () {
+	const chunkX = Math.floor(this.player.position.x / 16);
+	const chunkZ = Math.floor(this.player.position.z / 16);
+	const saveNodes = [];
+
+	for (const i in this.world.chunks) {
+		const chunk = this.world.chunks[i];
+		if (Math.abs(chunk.x - chunkX) <= 1 && Math.abs(chunk.z - chunkZ) <= 1) {
+			for (const node of chunk.nodes) {
 				saveNodes.push({
-					x: this.world.chunks[i].nodes[j].x,
-					y: this.world.chunks[i].nodes[j].y,
-					z: this.world.chunks[i].nodes[j].z,
-					t: this.world.chunks[i].nodes[j].type.id
+					x: node.x,
+					y: node.y,
+					z: node.z,
+					t: node.type.id
 				});
 			}
 		}
 	}
-	
-	// add all player, spawnpoint and node data
-	var saveData = {
+
+	return JSON.stringify({
 		player: {
 			x: this.player.position.x.toFixed(2),
 			y: this.player.position.y.toFixed(2),
@@ -102,65 +94,62 @@ Save.prototype.getSaveData = function()
 		},
 		seed: this.world.map.seed,
 		nodes: saveNodes
-	};
-	
-	return JSON.stringify(saveData); 
-}
+	});
+};
 
-// ############################################################ LOAD METHODS
+// ####################################### LOAD METHODS
 
-Save.prototype.loadLocalSave = function()
-{
-	if(worldName = document.getElementById("load").value)
-	{
-		this.loadWorld(window.localStorage.getItem(worldName));
+Save.prototype.loadLocalSave = function () {
+	const worldName = document.getElementById("load").value;
+	if (worldName) {
+		const data = window.localStorage.getItem(worldName);
+		this.loadWorld(data);
 	}
-}
+};
 
-Save.prototype.loadFromFile = function(file)
-{
-	var reader = new FileReader();
-	
-	reader.onload = function(e)
-	{
+Save.prototype.loadFromFile = function (file) {
+	const reader = new FileReader();
+
+	reader.onload = (e) => {
 		this.loadWorld(e.target.result);
-	}
-	
-	reader.onerror = function(e)
-	{
-		switch(reader.error.code)
-		{
-			// file was uploaded with file:// protocol
-			case 2: alert("You cannot load files when running locally due to security reasons."); break;
-			default: alert("Could not load file. Error code: "+reader.error.code);
-		}
-	}
-	
-	reader.readAsText(file);
-}
+	};
 
-Save.prototype.loadWorld = function(worldData)
-{
-	worldData = JSON.parse(worldData);
+	reader.onerror = () => {
+		const error = reader.error;
+		if (error && (error.code === 2 || error.name === 'NotReadableError')) {
+			alert("You cannot load files when running locally due to security reasons.");
+		} else {
+			alert("Could not load file. Error code: " + error?.code);
+		}
+	};
+
+	reader.readAsText(file);
+};
+
+Save.prototype.loadWorld = function (worldData) {
+	const data = JSON.parse(worldData);
+
 	this.world.chunks = {};
-	this.world.seed = parseInt(worldData.seed);
-	for(var i in worldData.nodes)
-	{
-		var node = worldData.nodes[i];
-		this.world.addNode(parseInt(node.x), parseInt(node.y), parseInt(node.z), nodeType.getTypeName(parseInt(node.t)));
+	this.world.seed = parseInt(data.seed);
+
+	for (const node of data.nodes) {
+		this.world.addNode(
+			parseInt(node.x),
+			parseInt(node.y),
+			parseInt(node.z),
+			nodeType.getTypeName(parseInt(node.t))
+		);
 	}
-	
-	// restore player position
+
 	this.player.position = {
-		x: parseFloat(worldData.player.x),
-		y: parseFloat(worldData.player.y),
-		z: parseFloat(worldData.player.z),
+		x: parseFloat(data.player.x),
+		y: parseFloat(data.player.y),
+		z: parseFloat(data.player.z)
 	};
-	
-	// restore player rotation
+
 	this.player.rotation = {
-		x: parseFloat(worldData.player.rx),
-		y: parseFloat(worldData.player.ry),
-		z: parseFloat(worldData.player.rz),
+		x: parseFloat(data.player.rx),
+		y: parseFloat(data.player.ry),
+		z: parseFloat(data.player.rz)
 	};
-}
+};
